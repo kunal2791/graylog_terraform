@@ -1,11 +1,11 @@
-region = "eu-west-2"
-env = "stage"
+region = ""
+env = ""
 vpc_id = "vpc-2a572943"
 owner = "test"
 r53zone_id = "Z3JYH3UMSG4RD7"
 ssh_key = "My_vpc_key.pem"
-graylog_ami = "ami-3c4d5658"
+graylog_ami = "ami-graylog"
 dns_name = "test-stage.cloudops.aa.st"
-subnet_public_ids = [ "subnet-876f07fc","subnet-df913cb6" ]
+subnet_public_ids = [ "subnet-0","subnet-1" ]
 app_port = "9000"
 alb_access_port = "80"
