@@ -1,0 +1,6 @@
+#################################################################################################
+#Script to install & configure graylog server.                                                  #
+# It contains instance,ALB,TG,LISTNERS,SG,r53 for AWS environment.                              #
+#################################################################################################
+Just modify terraform.tfvars entries according to your project.
+
