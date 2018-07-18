@@ -6,12 +6,12 @@ resource "aws_security_group" "graylog" {
   description = "sg for public instance"
   vpc_id = "${var.vpc_id}"
 
-#ssh_RULE
+#Access_RULE
   ingress {
    from_port = 22
    to_port = 22
    protocol = "tcp"
-   cidr_blocks = ["0.0.0.0/0"]
+   cidr_blocks = ["${var.jumpbox_ip}"]
   }
 
  ingress {
@@ -52,19 +52,6 @@ resource "aws_security_group" "alb" {
     protocol = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
- ingress {
-   from_port = 80
-   to_port = 80
-   protocol = "tcp"
-   cidr_blocks = ["0.0.0.0/0"]
-  }
-
- egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 }
 
 #Templete file to install graylog
@@ -87,7 +74,7 @@ resource "aws_instance" "graylog" {
   monitoring = "true"
   ami = "${var.graylog_ami}"
    tags {
-        Name        = "${var.owner}-${var.env}-graylog"
+        Name        = "${var.env}-graylog"
         Environment = "${lower(var.env)}"
         Owner = "${var.owner}"
 }
@@ -96,15 +83,15 @@ resource "aws_instance" "graylog" {
   #user_data = "${file("${path.module}/init.tpl")}"
    user_data = "${data.template_file.shell.rendered}"
   vpc_security_group_ids = ["${aws_security_group.graylog.id}"]
-#  iam_instance_profile = "${aws_iam_instance_profile.new_profile.id}"
-  subnet_id = "${element(var.subnet_public_ids,1)}"
+  iam_instance_profile = "${aws_iam_instance_profile.graylog.id}"
+  subnet_id = "${var.subnet_private_id}"
 }
 
 # ALB setup
 #ALB creation to accept HTTPS request and route at graylog server.
 
 resource "aws_alb" "graylog" {
-  name            = "Graylog-ALB"
+  name            = "${var.env}-graylog-alb"
   internal        = false
   security_groups = ["${aws_security_group.alb.id}"]
   subnets = ["${element(var.subnet_public_ids,1)}", "${element(var.subnet_public_ids,2)}"]
@@ -119,7 +106,7 @@ resource "aws_alb" "graylog" {
 #ALB target group
 
 resource "aws_alb_target_group" "graylog" {
-  name     = "graylog-tg"
+  name     = "${var.env}-graylog-tg"
   port     = "${var.app_port}"
   protocol = "${var.graylog_protocol}"
   vpc_id   = "${var.vpc_id}"
@@ -133,6 +120,11 @@ health_check {
     unhealthy_threshold = 3
     timeout             = 5
     protocol            = "${var.graylog_protocol}"
+  }
+  tags {
+        Name        = "${var.env}-graylog"
+        Environment = "${lower(var.env)}"
+        Owner = "${var.owner}"
   }
 }
 
@@ -156,9 +148,9 @@ resource "aws_alb_target_group_attachment" "graylog-tg" {
 resource "aws_alb_listener" "graylog_https" {
   load_balancer_arn = "${aws_alb.graylog.arn}"
   port              = "${var.alb_access_port}"
-  protocol          = "HTTP"
-#  certificate_arn   = "${var.certificate_arn}"
-#  ssl_policy        = "ELBSecurityPolicy-2015-05"
+  protocol          = "HTTPS"
+  certificate_arn   = "${var.certificate_arn}"
+  ssl_policy        = "ELBSecurityPolicy-2015-05"
 
   default_action {
     target_group_arn = "${aws_alb_target_group.graylog.id}"
@@ -180,6 +172,162 @@ resource "aws_route53_record" "graylog-r53" {
     name                   = "${aws_alb.graylog.dns_name}"
     zone_id                = "${aws_alb.graylog.zone_id}"
     evaluate_target_health = true
+  }
+}
+
+##This resouce willattach IAM role to graylog server
+resource "aws_iam_instance_profile" "graylog" {
+  name  = "graylog"
+  role = "${aws_iam_role.graylog_role.name}"
+}
+
+##This resouce will create IAM role
+resource "aws_iam_role" "graylog_role" {
+  name = "${var.env}_graylog"
+  path = "/"
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+EOF
+}
+
+##This resouce will atatch IAM inline policy to IAM role
+resource "aws_iam_role_policy" "graylog_policy" {
+  name = "${var.env}_graylog"
+  role = "${aws_iam_role.graylog_role.id}"
+
+  policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": [
+                "autoscaling:Describe*",
+                "cloudwatch:*",
+                "logs:*",
+                "sns:*"
+            ],
+            "Effect": "Allow",
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": "iam:CreateServiceLinkedRole",
+            "Resource": "arn:aws:iam::*:role/aws-service-role/events.amazonaws.com/AWSServiceRoleForCloudWatchEvents*",
+            "Condition": {
+                "StringLike": {
+                    "iam:AWSServiceName": "events.amazonaws.com"
+                }
+            }
+        }
+    ]
+}
+EOF
+}
+
+#CloudWatch Alarm for graylog
+
+resource "aws_cloudwatch_metric_alarm" "graylog" {
+  alarm_name                = "${var.owner}-${var.env}-graylog_CpuUtilization"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "3"
+  metric_name               = "CPUUtilization"
+  namespace                 = "AWS/EC2"
+  period                    = "300"
+  statistic                 = "Average"
+  threshold                 = "80"
+  alarm_description         = "${var.env}-graylog-CPUUtilization"
+  alarm_actions = [
+    "${var.sns_topic}"]
+  dimensions = {
+  InstanceId = "${aws_instance.graylog.id}"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "graylog-memory" {
+  alarm_name                = "${var.owner}-${var.env}-graylog_MemoryUtilization"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "3"
+  metric_name               = "MemoryUtilization"
+  namespace                 = "System/Linux"
+  period                    = "300"
+  statistic                 = "Average"
+  threshold                 = "80"
+  alarm_description         = "${var.env}-graylog-MemoryUtilization"
+  alarm_actions = [
+    "${var.sns_topic}"]
+  dimensions = {
+  InstanceId = "${aws_instance.graylog.id}"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "graylog-disk" {
+  alarm_name                = "${var.owner}-${var.env}-graylog_DiskSpaceUtilization"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "3"
+  metric_name               = "DiskSpaceUtilization"
+  namespace                 = "System/Linux"
+  period                    = "300"
+  statistic                 = "Average"
+  threshold                 = "80"
+  alarm_description         = "${var.env}-graylog-DiskSpaceUtilization"
+  alarm_actions = [
+    "${var.sns_topic}"]
+  dimensions = {
+  Filesystem = "/dev/xvda1"
+  MountPath = "/"
+  InstanceId = "${aws_instance.graylog.id}"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "graylog-secoundary-disk" {
+  alarm_name                = "${var.owner}-${var.env}-graylog_SecoundaryDiskSpaceUtilization"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "3"
+  metric_name               = "DiskSpaceUtilization"
+  namespace                 = "System/Linux"
+  period                    = "300"
+  statistic                 = "Average"
+  threshold                 = "80"
+  alarm_description         = "${var.env}-graylog-SecoundaryDisk-DiskSpaceUtilization"
+  alarm_actions = [
+    "${var.sns_topic}"]
+  dimensions = {
+  Filesystem = "/dev/xvdb"
+  MountPath = "/var/lib/elasticsearch"
+  InstanceId = "${aws_instance.graylog.id}"
+  }
+}
+ 
+  resource "aws_cloudwatch_metric_alarm" "graylog-alb-unhealthy-host" {
+  alarm_name                = "${var.owner}-${var.env}-graylog_unhealthy-host"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "3"
+  metric_name               = "UnHealthyHostCount"
+  namespace                 = "AWS/ApplicationELB"
+  period                    = "60"
+  statistic                 = "Sum"
+  threshold                 = "1"
+  alarm_description         = "${var.env}-graylog-unhealthy-host"
+  alarm_actions = [
+    "${var.sns_topic}"]
+  dimensions = {
+    LoadBalancer = "${replace("${aws_alb.graylog.arn}", "/arn:.*?:loadbalancer\\/(.*)/", "$1")}"
+  //TargetGroup =  "${replace("${aws_alb_target_group.graylog.arn}", "/arn:.*?:/\\/(.*)/", "$1")}"
+  //LoadBalancer = "${aws_alb.graylog.name}"
+   TargetGroup = "${aws_alb_target_group.graylog.arn_suffix}"
   }
 }
 
